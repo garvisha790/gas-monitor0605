@@ -1,0 +1,3 @@
+<Box display="flex" justifyContent="center" mb={2}>
+  <img src="/logo.png" alt="Oxygen Monitor Logo" style={{ width: "100px" }} />
+</Box>
