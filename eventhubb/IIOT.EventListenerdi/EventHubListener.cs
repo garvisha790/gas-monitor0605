@@ -12,6 +12,10 @@ using MongoDB.Bson;
 using MongoDB.Bson.Serialization.Attributes;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net.WebSockets;
+using System.Threading;
+using Microsoft.Extensions.Configuration;
+using IIOT.EventListener; // Add reference to WebSocketClient namespace
 
 public class IoTDataProcessor
 {
@@ -23,6 +27,10 @@ public class IoTDataProcessor
     private MongoDataService? _mongoDataService;
     private int _alarmsInserted = 0;
     private bool _isInitialized = false;
+    
+    // WebSocket client for real-time data broadcasting
+    private WebSocketClient _webSocketClient;
+    private readonly string _webSocketServerUrl;
     
     // Add sensor value cache for delta optimization - tracks the last known values for each device and sensor
     // Track the last sensor values we've seen for each device
@@ -79,6 +87,13 @@ public class IoTDataProcessor
             _mongoConnectionString = Environment.GetEnvironmentVariable("MongoDbConnectionString");
             _logger.LogInformation("Initializing IoTDataProcessor with MongoDB");
             
+            // Get WebSocket server URL from configuration
+            _webSocketServerUrl = Environment.GetEnvironmentVariable("WebSocketServerUrl") ?? "ws://localhost:5000/ws?clientType=producer";
+            _logger.LogInformation($"WebSocket server URL: {_webSocketServerUrl}");
+            
+            // Initialize WebSocket client
+            _webSocketClient = new IIOT.EventListener.WebSocketClient(logger, _webSocketServerUrl);
+            
             // Initialize MongoDB client if connection string is available
             if (!string.IsNullOrEmpty(_mongoConnectionString))
             {
@@ -130,6 +145,9 @@ public class IoTDataProcessor
             IsBatched = true)] 
         EventData[] events)
     {
+        // Ensure WebSocket connection is established
+        await _webSocketClient.EnsureConnectedAsync();
+        
         // Reset counter at the beginning of processing
         _alarmsInserted = 0;
         
@@ -362,8 +380,10 @@ public class IoTDataProcessor
                     {
                         foreach (var alert in alertsArray)
                         {
-                            string alertCode = alert["code"]?.ToString() ?? "unknown";
-                            string alertDesc = alert["desc"]?.ToString() ?? "unknown";
+                            string alertCode = alert["code"]?.ToString();
+                            string alertDesc = alert["desc"]?.ToString();
+                            string alertValue = alert["value"]?.ToString();
+                            
                             _logger.LogInformation("Alert detected for device {DeviceId}: {AlertCode} - {AlertDesc}", 
                                 deviceId, alertCode, alertDesc);
                         }
@@ -1003,7 +1023,10 @@ public class IoTDataProcessor
 
             // Insert document
             await _telemetryCollection.InsertOneAsync(telemetryDocument);
-            _logger.LogInformation("Successfully inserted telemetry data into MongoDB with ID: {Id}", telemetryDocument.Id);
+            _logger.LogInformation("Finished processing telemetry for device {DeviceName}", deviceName);
+
+            // Send telemetry data to WebSocket server for real-time updates
+            await _webSocketClient.SendTelemetryAsync(jsonObject, deviceName);
         }
         catch (Exception ex)
         {
@@ -1202,9 +1225,13 @@ public class IoTDataProcessor
             }
             
             // Email sending logic skipped for MongoDB migration - just log info
-            _logger.LogInformation("Alert would be sent for device {DeviceName} in plant {PlantName}", 
-                alertData["device"]?.ToString() ?? "unknown",
-                GetPlantNameFromDevice(alertData["device"]?.ToString() ?? "unknown"));
+            _alarmsInserted++;
+
+            _logger.LogInformation("Inserted alarm into MongoDB for device {DeviceName} - Code: {AlarmCode}", 
+                alertData["device"]?.ToString() ?? "unknown", GetAlertCode(alertData));
+
+            // Send alarm data to WebSocket server for real-time updates
+            await _webSocketClient.SendAlarmAsync(alertData, alertData["device"]?.ToString() ?? "unknown");
         }
         catch (Exception ex)
         {

@@ -13,7 +13,11 @@ import {
   getRealtimeTelemetryData, 
   getTelemetryData,
   clearDeviceCache,
-  restartDevice
+  restartDevice,
+  // WebSocket subscription functions
+  subscribeTelemetry,
+  subscribeAlarms,
+  subscribeConnection
 } from "../services/telemetryService";
 import { Line } from "react-chartjs-2";
 import TextField from '@mui/material/TextField';
@@ -150,9 +154,13 @@ const TelemetryDashboard = () => {
   const [threshold, setThreshold] = useState('');
   const [newThreshold, setNewThreshold] = useState('');
   
+  // WebSocket connection status
+  const [wsConnected, setWsConnected] = useState(false);
+  
   // For tolerance values
   const [selectedToleranceMetric, setSelectedToleranceMetric] = useState('');
   const [currentTolerance, setCurrentTolerance] = useState('');
+  const [latestData, setLatestData] = useState(null);
   const [newTolerance, setNewTolerance] = useState('');
   
   const theme = useTheme();
@@ -190,17 +198,19 @@ const TelemetryDashboard = () => {
   }, [location.search]);
   
   // Fetch alarm count from the backend
+  // Fetch alarm count from the backend
+  const fetchAlarmCount = async () => {
+    try {
+      const response = await axios.get('http://localhost:5000/api/alarms');
+      const alarms = response.data;
+      setLocalAlarmCount(alarms.length);
+    } catch (error) {
+      console.error('Error fetching alarm count:', error);
+    }
+  };
+  
+  // Initialize alarm count and set up polling
   useEffect(() => {
-    const fetchAlarmCount = async () => {
-      try {
-        const response = await axios.get('http://localhost:5000/api/alarms');
-        const alarms = response.data;
-        setLocalAlarmCount(alarms.length);
-      } catch (error) {
-        console.error('Error fetching alarm count:', error);
-      }
-    };
-    
     fetchAlarmCount();
     // Set up interval to refresh alarm count
     const interval = setInterval(fetchAlarmCount, 30000);
@@ -419,32 +429,76 @@ const TelemetryDashboard = () => {
   };
   
   useEffect(() => {
-    if (!selectedDevice) return;
+    if (selectedDevice) {
+      // Load initial data
+      fetchLatestEntry();
+      fetchHistoricalData();
+      fetchRealtimeData();
+      
+      // Subscribe to real-time telemetry updates via WebSocket
+      const telemetryUnsubscribe = subscribeTelemetry(selectedDevice, handleTelemetryUpdate);
+      
+      // Fetch alarm count initially
+      fetchAlarmCount();
+      
+      // Subscribe to WebSocket connection status
+      const connectionUnsubscribe = subscribeConnection(setWsConnected);
+      
+      // Subscribe to alarm updates
+      const alarmUnsubscribe = subscribeAlarms(handleAlarmUpdate);
 
-    // Initial data fetch - all at once
-    Promise.all([
-      fetchLatestEntry(),
-      fetchRealtimeData(),
-      fetchHistoricalData()
-    ]).then(() => {
-      setLoading(false);
+      // Cleanup subscriptions on unmount
+      return () => {
+        telemetryUnsubscribe();
+        connectionUnsubscribe();
+        alarmUnsubscribe();
+      };
+    }
+  }, [selectedDevice]);
+
+  // Handle real-time telemetry updates from WebSocket
+  const handleTelemetryUpdate = (data) => {
+    console.log("🔄 WebSocket telemetry update received:", data);
+    
+    // Update the latest telemetry data
+    setLatestData(data);
+    
+    // Update real-time data charts
+    setRealtimeData(prevData => {
+      // Create a copy of existing data
+      const newData = [...prevData];
+      
+      // Add new data point
+      newData.push(data);
+      
+      // Keep only the last 20 entries to prevent the chart from getting too crowded
+      if (newData.length > 20) {
+        newData.shift();
+      }
+      
+      return newData;
     });
-
-    // Optimize intervals for better UX:
-    // - Faster initial updates
-    // - Longer display time for readability
-    // - Staggered updates to prevent simultaneous fetches
-    const latestInterval = setInterval(fetchLatestEntry, 3000);    // Every 3 seconds
-    const realtimeInterval = setInterval(fetchRealtimeData, 5000); // Every 5 seconds
-    const historicalInterval = setInterval(fetchHistoricalData, 15000); // Every 15 seconds
-
-    return () => {
-      clearInterval(latestInterval);
-      clearInterval(realtimeInterval);
-      clearInterval(historicalInterval);
-    };
-  }, [selectedDevice, fetchLatestEntry, fetchRealtimeData, fetchHistoricalData]);
+  };
   
+  // Handle alarm updates from WebSocket
+  const handleAlarmUpdate = (data) => {
+    console.log("🚨 WebSocket alarm update received:", data);
+    
+    // Increment alarm count to notify user
+    setLocalAlarmCount(prevCount => prevCount + 1);
+  };
+  
+  // Retrieve connection status
+  const getConnectionStatus = () => {
+    if (loading) return "Loading...";
+    if (error) return "Error";
+    if (wsConnected) return "WebSocket Connected";
+    if (latestData && latestData.timestamp) {
+      return "REST API Connected";
+    }
+    return "Disconnected";
+  };
+
   const handlePlantChange = (e) => {
     setSelectedPlant(e.target.value);
     setSelectedDevice("");
@@ -468,16 +522,6 @@ const TelemetryDashboard = () => {
     setError(null);
   };
   
-  const getConnectionStatus = () => {
-    switch (connectionStatus) {
-      case "connected": return "Connected";
-      case "disconnected": return "Disconnected";
-      case "error": return "Connection Error";
-      case "no data": return "No data available";
-      default: return "Unknown";
-    }
-  };
-  console.log("LAtest Entry:", latestEntry);
   const renderAlarmsTab = () => {
     return (
       <>
@@ -911,11 +955,6 @@ const TelemetryDashboard = () => {
                 label={
                   <Box sx={{ display: 'flex', alignItems: 'center' }}>
                     <span>Status</span>
-                    {activeTab === "status" && (
-                      <Typography variant="caption" sx={{ ml: 1 }}>
-                        ({getConnectionStatus()})
-                      </Typography>
-                    )}
                   </Box>
                 } 
                 value="status" 
